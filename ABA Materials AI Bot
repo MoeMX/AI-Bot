@@ -381,9 +381,10 @@ function storyTemplate({ storyTopic, storyTone, storyLang, storyNotes }: any) {
   return `Social Story Draft\nTopic: ${storyTopic}\nTone: ${storyTone}\nLanguage: ${storyLang}\nNotes: ${storyNotes}\n\n${pages.map((p, i) => `Page ${i + 1}: ${p}`).join("\n")}\n\nPicture Placeholders: [ ] on each page`;
 }
 
-npx create-next-app@latest aba-materials-bot
-cd aba-materials-bot
-npm i
+// npx create-next-app@latest aba-materials-bot
+// cd aba-materials-bot
+// npm i
+
 import { NextRequest, NextResponse } from "next/server";
 // import OpenAI from "openai";
 
@@ -411,4 +412,4 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ text });
 }
 
-npm run dev
+// npm run dev
