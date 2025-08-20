@@ -1,0 +1,414 @@
+import React, { useMemo, useState } from "react";
+
+// MVP Prototype UI for a No‑PHI ABA Materials Generator
+// ----------------------------------------------------
+// ✅ Goals
+//  - Single-file React component you can drop into Next.js (/app or /pages) or Create React App
+//  - Four generators: Activity Builder, Visuals & Printables, Data Kit, Social Story
+//  - No PHI guardrail (hard-coded ON). The app should only generate generic materials.
+//  - Replace the mock `generate()` function with your OpenAI API call on the server.
+//
+// 🧩 How to wire models (summary)
+// 1) Add an API route (e.g., /api/generate) that calls OpenAI (text + image if desired).
+// 2) Pass a structured payload from this component → your API (never expose keys in the browser).
+// 3) On the server, enforce PHI blocking and prompt templates below.
+//
+// 🔒 No‑PHI Guardrail (frontend)
+//  - UI shows a persistent banner and blocks inputs that look like names, DOBs, addresses, phone numbers, or emails.
+//  - This is best‑effort; enforce again on the server.
+
+const DEFAULT_STYLE = {
+  brand: {
+    clinic: "Behavior Bridges ABA",
+    primary: "#4f46e5",
+  },
+  footer: "For internal clinical use only. Do not add names, dates of birth, addresses, or other PHI.",
+};
+
+const PHI_REGEXES: RegExp[] = [
+  /\b(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2})\b/i, // dates
+  /\b(\d{3}[- .]?\d{2}[- .]?\d{4})\b/, // SSN-like
+  /\b(\+?1?[ -.]?\(?\d{3}\)?[ -.]*\d{3}[ -.]*\d{4})\b/, // phone
+  /\b\d{3,5}\s+([A-Za-z]+\s){1,3}(Street|St|Avenue|Ave|Road|Rd|Lane|Ln|Drive|Dr)\b/i, // street address
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/, // email
+  /\b(Name|DOB|Date of Birth|MRN|Medical Record Number)\b/i, // explicit fields
+];
+
+function hasPHI(s: string): boolean {
+  return PHI_REGEXES.some((r) => r.test(s));
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-2xl shadow p-4 md:p-6 bg-white border border-gray-100">
+      <h2 className="text-xl md:text-2xl font-semibold mb-3">{title}</h2>
+      {children}
+    </div>
+  );
+}
+
+function TextArea({
+  label,
+  value,
+  setValue,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  setValue: (v: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <div className="mb-3">
+      <label className="block text-sm font-medium mb-1">{label}</label>
+      <textarea
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={placeholder}
+        className="w-full rounded-xl border p-3 min-h-[90px] focus:outline-none focus:ring"
+      />
+    </div>
+  );
+}
+
+function Select({ label, value, setValue, options }: { label: string; value: string; setValue: (v: string) => void; options: string[] }) {
+  return (
+    <div className="mb-3">
+      <label className="block text-sm font-medium mb-1">{label}</label>
+      <select
+        className="w-full rounded-xl border p-3 bg-white"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      >
+        {options.map((o) => (
+          <option key={o} value={o}>
+            {o}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function Output({ title, text }: { title: string; text: string }) {
+  return (
+    <div className="mt-4">
+      <h3 className="text-lg font-semibold mb-2">{title}</h3>
+      <pre className="whitespace-pre-wrap rounded-xl bg-gray-50 border p-4 text-sm">{text || "(Your output will appear here)"}</pre>
+    </div>
+  );
+}
+
+const activityGoals = [
+  "Manding",
+  "Tacting",
+  "Intraverbals",
+  "Imitation",
+  "Play Skills",
+  "Self-Help / ADLs",
+  "Functional Communication",
+  "Listener Responding",
+  "Executive Functioning",
+];
+
+const levels = ["Early Learner", "Emerging", "Intermediate", "Advanced"];
+const settings = ["Table", "Floor/Play", "Natural Environment", "Community"];
+const materialsOnHand = ["Blocks", "Cars", "Bubbles", "Pretend Food", "Books", "Crayons", "Picture Cards", "Ball", "Stickers"]; 
+
+export default function ABAMaterialsBot() {
+  const [tab, setTab] = useState("activities");
+  const [goal, setGoal] = useState(activityGoals[0]);
+  const [level, setLevel] = useState(levels[0]);
+  const [setting, setSetting] = useState(settings[1]);
+  const [materials, setMaterials] = useState<string>("");
+  const [constraints, setConstraints] = useState("Short session (10–15 min), minimize prep");
+
+  const [visualType, setVisualType] = useState("Token Board (5 or 10)");
+  const [visualNotes, setVisualNotes] = useState("Stars, purple theme, low ink usage");
+
+  const [measure, setMeasure] = useState("Trial-by-Trial");
+  const [dataNotes, setDataNotes] = useState("Include space for prompts and independence");
+
+  const [storyTopic, setStoryTopic] = useState("Taking turns during playtime");
+  const [storyTone, setStoryTone] = useState("Kid-friendly");
+  const [storyLang, setStoryLang] = useState("English");
+  const [storyNotes, setStoryNotes] = useState("Simple sentences, pictures placeholders");
+
+  const [output, setOutput] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const showPhiWarning = useMemo(() => {
+    const payload = [materials, constraints, visualNotes, dataNotes, storyTopic, storyNotes].join("\n");
+    return hasPHI(payload);
+  }, [materials, constraints, visualNotes, dataNotes, storyTopic, storyNotes]);
+
+  async function generate(kind: "activities" | "visuals" | "data" | "story") {
+    setError(null);
+
+    if (showPhiWarning) {
+      setError("Your input appears to contain personal identifiers. Please remove names, dates, addresses, phone numbers, or emails.");
+      return;
+    }
+
+    // 🔧 Replace with server call to your /api/generate route.
+    // Example (Next.js):
+    // const res = await fetch("/api/generate", {
+    //   method: "POST",
+    //   headers: { "Content-Type": "application/json" },
+    //   body: JSON.stringify({ kind, payload: { goal, level, setting, materials, constraints, visualType, visualNotes, measure, dataNotes, storyTopic, storyTone, storyLang, storyNotes } }),
+    // });
+    // const data = await res.json();
+    // setOutput(data.text);
+
+    // For the prototype, we mock deterministic outputs with structured templates.
+    const canned = mockGenerate({ kind, goal, level, setting, materials, constraints, visualType, visualNotes, measure, dataNotes, storyTopic, storyTone, storyLang, storyNotes });
+    setOutput(canned);
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50">
+      <header className="sticky top-0 z-10 bg-white/90 backdrop-blur border-b">
+        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-2xl" style={{ background: DEFAULT_STYLE.brand.primary }} />
+            <div>
+              <div className="text-base leading-tight font-semibold">{DEFAULT_STYLE.brand.clinic}</div>
+              <div className="text-xs text-gray-500">ABA Materials Generator • No‑PHI</div>
+            </div>
+          </div>
+          <div className="hidden md:block text-xs text-gray-500">{DEFAULT_STYLE.footer}</div>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto px-4 py-6 md:py-10">
+        {/* NO‑PHI banner */}
+        <div className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm">
+          <b>Important:</b> Do <i>not</i> enter names, dates of birth, addresses, phone numbers, emails, MRNs, or any identifiers. This tool generates <b>generic</b> materials only.
+          <div className="mt-1 text-amber-700">Inputs are checked for identifiers and will be blocked if detected.</div>
+        </div>
+
+        {/* Tabs */}
+        <div className="mb-4 flex gap-2 flex-wrap">
+          {[
+            { id: "activities", label: "Activity Builder" },
+            { id: "visuals", label: "Visuals & Printables" },
+            { id: "data", label: "Data Kit" },
+            { id: "story", label: "Social Story / Handout" },
+          ].map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-4 py-2 rounded-full border ${tab === t.id ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700"}`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Activity Builder */}
+        {tab === "activities" && (
+          <Section title="Activity Builder">
+            <div className="grid md:grid-cols-2 gap-4">
+              <Select label="Goal" value={goal} setValue={setGoal} options={activityGoals} />
+              <Select label="Learner Level" value={level} setValue={setLevel} options={levels} />
+              <Select label="Setting" value={setting} setValue={setSetting} options={settings} />
+              <TextArea label="Materials on hand (comma separated)" value={materials} setValue={setMaterials} placeholder={materialsOnHand.join(", ")}/>
+            </div>
+            <TextArea label="Constraints / guidance" value={constraints} setValue={setConstraints} />
+            {error && <div className="text-red-600 text-sm mt-1">{error}</div>}
+            <div className="mt-3 flex gap-2">
+              <button onClick={() => generate("activities")} className="px-4 py-2 rounded-xl bg-indigo-600 text-white">Generate</button>
+            </div>
+            <Output title="Proposed Activities + Task Analyses" text={output} />
+          </Section>
+        )}
+
+        {/* Visuals & Printables */}
+        {tab === "visuals" && (
+          <Section title="Visuals & Printables">
+            <div className="grid md:grid-cols-2 gap-4">
+              <Select label="Visual Type" value={visualType} setValue={setVisualType} options={["Token Board (5)", "Token Board (10)", "First‑Then Board", "Daily Schedule (3–5 steps)", "PECS/Icons Grid (2x3)", "PECS/Icons Grid (3x4)", "Choice Board (2x3)"]} />
+              <TextArea label="Theme / notes" value={visualNotes} setValue={setVisualNotes} />
+            </div>
+            {error && <div className="text-red-600 text-sm mt-1">{error}</div>}
+            <div className="mt-3 flex gap-2">
+              <button onClick={() => generate("visuals")} className="px-4 py-2 rounded-xl bg-indigo-600 text-white">Generate</button>
+            </div>
+            <Output title="Printable Spec (passes to PDF generator)" text={output} />
+          </Section>
+        )}
+
+        {/* Data Kit */}
+        {tab === "data" && (
+          <Section title="Data Kit">
+            <div className="grid md:grid-cols-2 gap-4">
+              <Select label="Measurement type" value={measure} setValue={setMeasure} options={["Trial-by-Trial", "Frequency", "Duration", "Latency", "Interval (PIR)", "Interval (WIR)", "Momentary Time Sampling"]} />
+              <TextArea label="Notes" value={dataNotes} setValue={setDataNotes} />
+            </div>
+            {error && <div className="text-red-600 text-sm mt-1">{error}</div>}
+            <div className="mt-3 flex gap-2">
+              <button onClick={() => generate("data")} className="px-4 py-2 rounded-xl bg-indigo-600 text-white">Generate</button>
+            </div>
+            <Output title="Data Sheet Template" text={output} />
+          </Section>
+        )}
+
+        {/* Social Story / Handout */}
+        {tab === "story" && (
+          <Section title="Social Story / Caregiver Handout">
+            <div className="grid md:grid-cols-2 gap-4">
+              <TextArea label="Topic" value={storyTopic} setValue={setStoryTopic} />
+              <Select label="Tone" value={storyTone} setValue={setStoryTone} options={["Kid-friendly", "Parent-facing", "Clinician-facing"]) } />
+              <Select label="Language" value={storyLang} setValue={setStoryLang} options={["English", "Spanish", "Bilingual (EN/ES)"]} />
+              <TextArea label="Notes" value={storyNotes} setValue={setStoryNotes} />
+            </div>
+            {error && <div className="text-red-600 text-sm mt-1">{error}</div>}
+            <div className="mt-3 flex gap-2">
+              <button onClick={() => generate("story")} className="px-4 py-2 rounded-xl bg-indigo-600 text-white">Generate</button>
+            </div>
+            <Output title="Story / Handout Draft" text={output} />
+          </Section>
+        )}
+
+        <footer className="mt-10 text-xs text-gray-500 text-center">
+          {DEFAULT_STYLE.footer}
+        </footer>
+      </main>
+    </div>
+  );
+}
+
+// ----------------------------
+// Mock generator (deterministic)
+// ----------------------------
+
+function mockGenerate({ kind, goal, level, setting, materials, constraints, visualType, visualNotes, measure, dataNotes, storyTopic, storyTone, storyLang, storyNotes }: any): string {
+  switch (kind) {
+    case "activities":
+      return activityTemplate({ goal, level, setting, materials, constraints });
+    case "visuals":
+      return visualsTemplate({ visualType, visualNotes });
+    case "data":
+      return dataTemplate({ measure, dataNotes });
+    case "story":
+      return storyTemplate({ storyTopic, storyTone, storyLang, storyNotes });
+    default:
+      return "";
+  }
+}
+
+function bullet(items: string[]): string {
+  return items.map((i) => `• ${i}`).join("\n");
+}
+
+function activityTemplate({ goal, level, setting, materials, constraints }: any) {
+  const m = materials ? materials.split(",").map((s: string) => s.trim()).filter(Boolean) : [];
+  const use = m.length ? m.join(", ") : "common toys/objects (blocks, cars, bubbles, picture cards)";
+
+  return `Goal: ${goal}\nLevel: ${level}\nSetting: ${setting}\nMaterials: ${use}\nConstraints: ${constraints}\n\nActivities (3):\n1) Warm‑up: Preference check / pairing (2–3 min)\n   Steps:\n${bullet([
+    "Offer 3–5 items, alternate free access and simple requests.",
+    "Model appropriate language and reinforce attempts.",
+  ])}\n\n2) Core activity targeting ${goal.toLowerCase()}\n   Task Analysis:\n${bullet([
+    "Present discriminative stimulus (SD).",
+    "Prompt as needed (least‑to‑most).",
+    "Reinforce correct response within 1–2s.",
+    "Error correction: model → guided → independent retry.",
+    "Rotate mastered and acquisition targets.",
+  ])}\n\n3) Naturalistic generalization in ${setting}\n   Steps:\n${bullet([
+    `Embed targets during play using ${use}.`,
+    "Vary SDs and people; thin reinforcement schedule.",
+    "End with a quick success and transition cue.",
+  ])}\n\nPrompting & Fading:\n${bullet([
+    "Start with least intrusive prompt that ensures success.",
+    "Fade immediately after first correct response.",
+    "Use time delay if appropriate.",
+  ])}\n\nReinforcement:\n${bullet([
+    "High-quality, immediate, behavior-specific praise.",
+    "Token economy if appropriate (exchange after 5–10).",
+  ])}\n\nData Notes:\n${bullet([
+    "Record trials (correct, prompted, incorrect).",
+    "Mark independence level (I, G, P).",
+    "Graph daily for visual analysis.",
+  ])}`;
+}
+
+function visualsTemplate({ visualType, visualNotes }: any) {
+  return `Printable Spec\nType: ${visualType}\nTheme/Notes: ${visualNotes}\n\nLayout Instructions for PDF Engine:\n${bullet([
+    "Page size: US Letter, margins 0.5 in",
+    "Header: clinic logo left, title centered (e.g., Token Board)",
+    "Footer: No PHI. Reusable across clients.",
+    visualType.includes("Token") ? "Draw token row with 5 or 10 circles (1.1 in) and a large reinforcer square (3x3 in)." : "",
+    visualType.includes("First‑Then") ? "Create two large boxes labeled FIRST and THEN with icons area below each." : "",
+    visualType.includes("Schedule") ? "Create 3–5 horizontal steps with icon boxes and brief text lines." : "",
+    visualType.includes("PECS") || visualType.includes("Choice") ? "Grid layout (2x3 or 3x4). Add cut-lines and light borders." : "",
+  ].filter(Boolean))}`;
+}
+
+function dataTemplate({ measure, dataNotes }: any) {
+  const base = [
+    "Sheet header: Goal (blank), Date (blank), Setting (blank)",
+    "Column: Trial/Interval, Response, Prompt Level, Notes",
+  ];
+  const extra =
+    measure === "Frequency"
+      ? ["Add Tally column; include session start/stop time."]
+      : measure === "Duration"
+      ? ["Add Start, Stop, Duration columns; include stopwatch tip."]
+      : measure === "Latency"
+      ? ["Add SD time and Response time; auto-calc latency."]
+      : measure.includes("Interval")
+      ? ["Define interval length; include PIR/WIR/MTS legend."]
+      : ["List 10 trials with checkboxes (✔/✖/P)."];
+
+  return `Data Sheet Template\nMeasure: ${measure}\nNotes: ${dataNotes}\n\nColumns/Structure:\n${bullet([...base, ...extra])}\n\nScoring Guide:\n${bullet([
+    "✔ = correct independent",
+    "P = prompted",
+    "✖ = incorrect / no response",
+  ])}`;
+}
+
+function storyTemplate({ storyTopic, storyTone, storyLang, storyNotes }: any) {
+  const pages = [
+    `Title: ${storyTopic}`,
+    "I can learn about this step by step.",
+    "Sometimes it feels new. That is OK.",
+    "I can look, listen, and try.",
+    "When I do, adults notice and are proud.",
+    "I can ask for help.",
+    "I can practice and get better each day.",
+  ];
+
+  return `Social Story Draft\nTopic: ${storyTopic}\nTone: ${storyTone}\nLanguage: ${storyLang}\nNotes: ${storyNotes}\n\n${pages.map((p, i) => `Page ${i + 1}: ${p}`).join("\n")}\n\nPicture Placeholders: [ ] on each page`;
+}
+
+npx create-next-app@latest aba-materials-bot
+cd aba-materials-bot
+npm i
+import { NextRequest, NextResponse } from "next/server";
+// import OpenAI from "openai";
+
+export async function POST(req: NextRequest) {
+  const body = await req.json();
+
+  // ❗ Double-check NO PHI on the server too.
+  const unsafe = /\\b(Name|DOB|Date of Birth|Address|MRN|\\d{3}-\\d{2}-\\d{4})\\b/i.test(JSON.stringify(body));
+  if (unsafe) return NextResponse.json({ error: "PHI detected. Remove identifiers." }, { status: 400 });
+
+  // 🔑 Use environment variables for keys (never in the browser)
+  // const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+
+  // Build your prompt from body.kind + body.payload
+  // const completion = await openai.chat.completions.create({
+  //   model: "gpt-4o-mini",
+  //   messages: [{ role: "system", content: "You are an ABA materials generator. Never include PHI." },
+  //              { role: "user", content: JSON.stringify(body) }],
+  //   temperature: 0.7,
+  // });
+  // const text = completion.choices[0]?.message?.content ?? "";
+
+  // For now return a stub so the UI works:
+  const text = "✅ Server call successful (wire your OpenAI call here).";
+  return NextResponse.json({ text });
+}
+
+npm run dev
